@@ -404,22 +404,3 @@ func TestOpenIsIdempotent(t *testing.T) {
 		t.Errorf("data did not survive reopening: %v", err)
 	}
 }
-
-func TestParseSeqIsPermissive(t *testing.T) {
-	t.Parallel()
-
-	tests := map[string]int64{
-		"":       0,
-		"0":      0,
-		"42":     42,
-		"-1":     0,
-		"abc":    0,
-		"9e9":    0,
-		"999999": 999999,
-	}
-	for in, want := range tests {
-		if got := ParseSeq(in); got != want {
-			t.Errorf("ParseSeq(%q) = %d, want %d", in, got, want)
-		}
-	}
-}

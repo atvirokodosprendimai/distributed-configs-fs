@@ -19,7 +19,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"strconv"
 
 	"github.com/glebarez/sqlite"
 	"github.com/pressly/goose/v3"
@@ -443,17 +442,4 @@ func (s *Store) Stats(ctx context.Context) (Stats, error) {
 		return Stats{}, fmt.Errorf("read feed head: %w", err)
 	}
 	return st, nil
-}
-
-// ParseSeq parses a "?since=" query value, treating absent or malformed input
-// as 0 (send me everything) rather than as an error.
-//
-// Being permissive here is deliberate: the cost of a spurious full sync is one
-// extra manifest, whereas rejecting the request leaves the two nodes diverged.
-func ParseSeq(raw string) int64 {
-	n, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil || n < 0 {
-		return 0
-	}
-	return n
 }
