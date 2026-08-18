@@ -50,6 +50,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -110,6 +111,24 @@ type Mirror struct {
 	// warnedChown keeps the privilege warning to once per process rather than
 	// once per file per scan.
 	warnedChown bool
+
+	// inflight holds paths with a local filesystem event that has been seen but
+	// not yet acted on, and render leaves those paths entirely alone.
+	//
+	// Without it there is a race that silently undoes deletions. A user removes
+	// a file; the watcher holds the event for the settle delay; a render fires
+	// in that window, sees the path live in the tree and missing from disk, and
+	// writes it back. When the event is finally processed the file exists again,
+	// so it is read as a modification rather than a removal and the deletion is
+	// lost — permanently, because the rescan deliberately never deletes. A live
+	// two-node test caught this; every unit test had missed it.
+	//
+	// It is written by the watcher goroutine and read by the run loop, hence the
+	// mutex.
+	inflight struct {
+		sync.Mutex
+		m map[string]struct{}
+	}
 }
 
 // Open prepares the mirror directory, creating it if absent.
@@ -127,7 +146,32 @@ func Open(cfg Config) (*Mirror, error) {
 	// Setting arbitrary ownership needs root (or CAP_CHOWN, which is rare
 	// enough not to assume). The first failed chown downgrades this anyway, so
 	// euid is a starting guess rather than the final word.
-	return &Mirror{cfg: cfg, root: root, log: cfg.Log, canChown: os.Geteuid() == 0}, nil
+	m := &Mirror{cfg: cfg, root: root, log: cfg.Log, canChown: os.Geteuid() == 0}
+	m.inflight.m = make(map[string]struct{})
+	return m, nil
+}
+
+// markInflight records that a path has an unprocessed local event.
+func (m *Mirror) markInflight(p string) {
+	m.inflight.Lock()
+	defer m.inflight.Unlock()
+	m.inflight.m[p] = struct{}{}
+}
+
+// clearInflight releases a path once its event has been acted on.
+func (m *Mirror) clearInflight(p string) {
+	m.inflight.Lock()
+	defer m.inflight.Unlock()
+	delete(m.inflight.m, p)
+}
+
+// isInflight reports whether a path has an unprocessed local event, in which
+// case render must not touch it.
+func (m *Mirror) isInflight(p string) bool {
+	m.inflight.Lock()
+	defer m.inflight.Unlock()
+	_, ok := m.inflight.m[p]
+	return ok
 }
 
 // Close releases the mirror directory handle.
@@ -221,6 +265,11 @@ func (m *Mirror) render(ctx context.Context) error {
 	})
 
 	for _, e := range entries {
+		// A path the user is in the middle of changing is not ours to touch;
+		// see Mirror.inflight.
+		if m.isInflight(e.Path) {
+			continue
+		}
 		switch e.Kind {
 		case core.KindDir:
 			if err := m.renderDir(e); err != nil {
@@ -345,7 +394,7 @@ func (m *Mirror) removeTombstoned(ctx context.Context) error {
 
 	var doomed []string
 	err = m.walk(func(p string, d fs.DirEntry) error {
-		if keep[p] {
+		if keep[p] || m.isInflight(p) {
 			return nil
 		}
 		// Only paths the tree explicitly knows as deleted are removed. A path

@@ -2,6 +2,7 @@ package mirror
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -371,6 +372,140 @@ func TestWatcherPromotesEditsAndDeletions(t *testing.T) {
 		e, err := st.Get(ctx, "watched.conf")
 		return err == nil && e.Deleted
 	})
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Errorf("Run() = %v", err)
+	}
+}
+
+// TestWatcherFollowsNewSubdirectories is the regression test for a bug a live
+// two-node smoke test found and the unit tests missed: everything above only
+// ever touched a root-level file.
+//
+// inotify is not recursive, so a directory created after startup needs its own
+// watch. Without one, changes inside it are invisible to the watcher — and
+// since deletions are detected *only* from events, a file removed from that
+// directory was never deleted from the cluster. Worse, the next render put it
+// straight back, so the removal silently undid itself.
+func TestWatcherFollowsNewSubdirectories(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	m, _, st, dir := harness(t)
+
+	done := make(chan error, 1)
+	go func() { done <- m.Run(ctx) }()
+
+	// A directory that did not exist when the watcher started.
+	write(t, dir, "nginx/nginx.conf", "worker_processes 4;", 0o644)
+	waitFor(t, "the file in the new subdirectory to reach the cluster", func() bool {
+		e, err := st.Get(ctx, "nginx/nginx.conf")
+		return err == nil && !e.Deleted
+	})
+
+	// The actual regression: removing it must be recorded as a deletion.
+	if err := os.Remove(filepath.Join(dir, "nginx", "nginx.conf")); err != nil {
+		t.Fatalf("Remove() = %v", err)
+	}
+	waitFor(t, "the deletion inside the subdirectory to reach the cluster", func() bool {
+		e, err := st.Get(ctx, "nginx/nginx.conf")
+		return err == nil && e.Deleted
+	})
+
+	// And it must stay deleted — a render that resurrects it is the same bug
+	// wearing a different hat.
+	waitFor(t, "the file to stay gone from disk", func() bool {
+		_, err := os.Stat(filepath.Join(dir, "nginx", "nginx.conf"))
+		return os.IsNotExist(err)
+	})
+	time.Sleep(200 * time.Millisecond)
+	if _, err := os.Stat(filepath.Join(dir, "nginx", "nginx.conf")); !os.IsNotExist(err) {
+		t.Error("the deleted file reappeared on disk")
+	}
+
+	// Nesting deeper must work too, since each level needs its own watch.
+	write(t, dir, "a/b/c/deep.conf", "deep", 0o644)
+	waitFor(t, "a deeply nested file to reach the cluster", func() bool {
+		e, err := st.Get(ctx, "a/b/c/deep.conf")
+		return err == nil && !e.Deleted
+	})
+	if err := os.Remove(filepath.Join(dir, "a/b/c/deep.conf")); err != nil {
+		t.Fatalf("Remove() = %v", err)
+	}
+	waitFor(t, "the deeply nested deletion to reach the cluster", func() bool {
+		e, err := st.Get(ctx, "a/b/c/deep.conf")
+		return err == nil && e.Deleted
+	})
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Errorf("Run() = %v", err)
+	}
+}
+
+// TestDeletionSurvivesConcurrentRender is the regression test for a race a live
+// two-node run found and every unit test above missed.
+//
+// A user removes a file. The watcher holds the event for the settle delay. If a
+// render fires inside that window it sees the path live in the tree and missing
+// from disk, and writes it back — so when the event is finally processed the
+// file exists again and is read as a modification rather than a removal. The
+// deletion is then lost permanently, because the rescan deliberately never
+// deletes.
+//
+// The scan interval here is far shorter than the settle delay specifically so
+// that a render is virtually guaranteed to land in the window.
+func TestDeletionSurvivesConcurrentRender(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	m, svc, st, dir := harness(t)
+	// Renders fire constantly; the settle delay is long enough that one is
+	// certain to hit while a removal is pending.
+	m.cfg.ScanInterval = 5 * time.Millisecond
+	m.cfg.Settle = 150 * time.Millisecond
+
+	done := make(chan error, 1)
+	go func() { done <- m.Run(ctx) }()
+
+	// Several files, in a subdirectory, so the case matches what the live run
+	// actually did.
+	for i := range 5 {
+		if err := svc.PutFile(ctx, fmt.Sprintf("nginx/f%d.conf", i), []byte("v1"), 0o644, 0, 0); err != nil {
+			t.Fatalf("PutFile() = %v", err)
+		}
+	}
+	waitFor(t, "the files to be rendered to disk", func() bool {
+		_, err := os.Stat(filepath.Join(dir, "nginx", "f4.conf"))
+		return err == nil
+	})
+
+	// Delete them while renders are running flat out.
+	for i := range 5 {
+		if err := os.Remove(filepath.Join(dir, "nginx", fmt.Sprintf("f%d.conf", i))); err != nil {
+			t.Fatalf("Remove() = %v", err)
+		}
+	}
+
+	waitFor(t, "every deletion to be recorded", func() bool {
+		for i := range 5 {
+			e, err := st.Get(ctx, fmt.Sprintf("nginx/f%d.conf", i))
+			if err != nil || !e.Deleted {
+				return false
+			}
+		}
+		return true
+	})
+
+	// And they must stay gone rather than being written back by a later render.
+	time.Sleep(300 * time.Millisecond)
+	for i := range 5 {
+		p := filepath.Join(dir, "nginx", fmt.Sprintf("f%d.conf", i))
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("%s came back after being deleted", p)
+		}
+	}
 
 	cancel()
 	if err := <-done; err != nil {

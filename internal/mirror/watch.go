@@ -128,6 +128,9 @@ func (m *Mirror) pump(ctx context.Context, w *fsnotify.Watcher, out chan<- []eve
 			// A later event supersedes an earlier one for the same path: a file
 			// removed and recreated within the settle window is a modification.
 			pending[rel] = removed
+			// Claim the path so a render running during the settle delay cannot
+			// write the file back and turn a deletion into a modification.
+			m.markInflight(rel)
 			timer = time.After(m.cfg.Settle)
 
 		case <-timer:
@@ -160,6 +163,7 @@ func (m *Mirror) enqueueTree(pending map[string]bool, dir string) {
 			return nil
 		}
 		pending[p] = false
+		m.markInflight(p)
 		return nil
 	})
 }
@@ -193,6 +197,14 @@ func (m *Mirror) relative(abs string) (string, bool) {
 // signal that unambiguously means "somebody deleted this", as opposed to "the
 // disk has not caught up with the tree yet".
 func (m *Mirror) applyEvents(ctx context.Context, batch []event) {
+	// Release the claims only once every path has been dealt with, so render
+	// stays off them for the whole window rather than just the settle delay.
+	defer func() {
+		for _, ev := range batch {
+			m.clearInflight(ev.Path)
+		}
+	}()
+
 	for _, ev := range batch {
 		if !ev.Removed {
 			// Re-stat rather than trusting the event: within the settle window
