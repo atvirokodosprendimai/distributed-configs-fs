@@ -1,0 +1,24 @@
+# Keep the build context to what the build actually needs. Everything sent here
+# is uploaded to the daemon on every build, and the local cluster state under
+# data/ can grow without bound.
+
+.git
+.gitignore
+.dockerignore
+
+# Local cluster state and secrets — never bake these into an image.
+.env
+data/
+
+# Compose and docs are not build inputs.
+docker-compose.yml
+README.md
+LICENSE
+
+# Build artefacts.
+dcfs
+*.db
+*.db-wal
+*.db-shm
+*.out
+coverage.*

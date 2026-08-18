@@ -1,0 +1,125 @@
+# A three-node distributed-configs-fs cluster.
+#
+#   cp .env.example .env      # then set DCFS_CLUSTER_SECRET
+#   docker compose up --build
+#
+# Edit ./data/node1/cluster on the host and watch the change appear in
+# ./data/node2/cluster and ./data/node3/cluster.
+#
+# Three nodes rather than two because two is the least interesting size: with
+# two, every partition is a tie and you learn nothing about how the cluster
+# behaves. Note that this is an AP system — it has no quorum, so a partitioned
+# node keeps accepting writes and conflicting edits are reconciled afterwards as
+# conflict copies rather than prevented.
+
+x-dcfs: &dcfs
+  # A shared image tag matters: without it compose treats each service as its
+  # own build target and compiles the identical context three times in
+  # parallel, which is both wasteful and enough to exhaust a modest Docker
+  # Desktop VM. With it, the image is built once and reused.
+  image: dcfs:${VERSION:-dev}
+  build:
+    context: .
+    args:
+      VERSION: ${VERSION:-dev}
+  restart: unless-stopped
+  env_file: .env
+  environment: &dcfs-env
+    # Overridden per service below; listed here so the shape is visible.
+    DCFS_BIND_ADDR: 0.0.0.0
+    DCFS_API_ADDR: 0.0.0.0:7947
+    # Compose service names resolve inside the network, so every node
+    # advertises its own name and peers dial that.
+    DCFS_MIRROR_DIR: /etc/cluster
+  # A node that starts before its seeds must come up anyway and serve its local
+  # tree, which it does — so there is deliberately no depends_on ordering here.
+  networks: [dcfs]
+
+services:
+  node1:
+    <<: *dcfs
+    container_name: dcfs-node1
+    hostname: node1
+    environment:
+      <<: *dcfs-env
+      DCFS_NODE: node1
+      DCFS_ADVERTISE_ADDR: node1
+      DCFS_ADVERTISE_API: node1:7947
+      # Every node seeds from every other. Any one reachable seed is enough, so
+      # listing all of them simply means no single node has to be up first.
+      DCFS_JOIN: node2:7946,node3:7946
+    volumes:
+      - node1-db:/var/lib/dcfs
+      - ./data/node1/cluster:/etc/cluster
+    ports:
+      # Published only for node1, so `dcfs status --api-addr 127.0.0.1:7947`
+      # works from the host. The API serves the contents of your config tree,
+      # so do not publish it on a public interface without thinking about it.
+      - "127.0.0.1:7947:7947"
+
+  node2:
+    <<: *dcfs
+    container_name: dcfs-node2
+    hostname: node2
+    environment:
+      <<: *dcfs-env
+      DCFS_NODE: node2
+      DCFS_ADVERTISE_ADDR: node2
+      DCFS_ADVERTISE_API: node2:7947
+      DCFS_JOIN: node1:7946,node3:7946
+    volumes:
+      - node2-db:/var/lib/dcfs
+      - ./data/node2/cluster:/etc/cluster
+
+  node3:
+    <<: *dcfs
+    container_name: dcfs-node3
+    hostname: node3
+    environment:
+      <<: *dcfs-env
+      DCFS_NODE: node3
+      DCFS_ADVERTISE_ADDR: node3
+      DCFS_ADVERTISE_API: node3:7947
+      DCFS_JOIN: node1:7946,node2:7946
+    volumes:
+      - node3-db:/var/lib/dcfs
+      - ./data/node3/cluster:/etc/cluster
+
+    # ---------------------------------------------------------------------
+    # To run this node in FUSE mode instead of (or alongside) mirror mode,
+    # set DCFS_MOUNT_POINT and uncomment the block below.
+    #
+    # All four pieces are needed and each fails differently without the others:
+    #   - /dev/fuse            the kernel refuses the mount outright
+    #   - SYS_ADMIN            mount(2) returns EPERM
+    #   - apparmor:unconfined  the default Docker profile blocks mount(2)
+    #   - bind-propagation     the mount is invisible on the host; the directory
+    #                          simply looks empty from outside the container
+    #
+    # environment:
+    #   DCFS_MOUNT_POINT: /mnt/cluster
+    # devices:
+    #   - /dev/fuse
+    # cap_add:
+    #   - SYS_ADMIN
+    # security_opt:
+    #   - apparmor:unconfined
+    # volumes:
+    #   - type: bind
+    #     source: ./data/node3/mnt
+    #     target: /mnt/cluster
+    #     bind:
+    #       propagation: rshared
+    # ---------------------------------------------------------------------
+
+networks:
+  dcfs:
+    driver: bridge
+
+volumes:
+  # Named volumes rather than bind mounts: the database is SQLite in WAL mode,
+  # and Docker Desktop's file sharing layer on macOS and Windows does not
+  # implement the locking WAL needs.
+  node1-db:
+  node2-db:
+  node3-db:
