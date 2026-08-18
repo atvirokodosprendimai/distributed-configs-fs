@@ -18,8 +18,16 @@ package core
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 )
+
+// ErrTooLarge reports a file beyond the configured per-file cap.
+//
+// It lives in the kernel because two unrelated packages need to agree on it:
+// the syncer raises it, and the FUSE projection maps it onto EFBIG so the
+// program doing the write sees the refusal at the syscall that caused it.
+var ErrTooLarge = errors.New("core: file exceeds max size")
 
 // Kind distinguishes the two things the cluster replicates. Symlinks, sockets,
 // FIFOs and device nodes are deliberately not replicated: a symlink is a path

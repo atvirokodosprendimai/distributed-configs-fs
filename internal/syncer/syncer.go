@@ -27,9 +27,9 @@ import (
 	"github.com/atvirokodosprendimai/distributed-configs-fs/internal/transport"
 )
 
-// ErrTooLarge is returned when a file exceeds the configured size cap. FUSE
-// maps it to EFBIG; the mirror logs it and skips the file.
-var ErrTooLarge = errors.New("syncer: file exceeds max size")
+// ErrTooLarge is an alias for the kernel's sentinel, so callers already holding
+// a syncer import do not need a second one to match on it.
+var ErrTooLarge = core.ErrTooLarge
 
 // Peers is the membership view the syncer reacts to. It is narrow so tests can
 // drive convergence without standing up gossip.
@@ -228,6 +228,42 @@ func (s *Service) PutDir(ctx context.Context, path string, mode, uid, gid uint32
 		GID:     gid,
 		Version: core.Version{HLC: s.clock.Now(), Origin: s.cfg.Node},
 	})
+}
+
+// SetAttr records a metadata-only change: a chmod or a chown on the mount.
+//
+// It exists so the FUSE layer can service those without reading the file's
+// content back out of the store just to hand it straight in again. The new
+// version keeps the same hash, which means a receiving node sees a write whose
+// content matches what it already holds and treats it as a clean supersession
+// rather than a conflict.
+func (s *Service) SetAttr(ctx context.Context, path string, mode, uid, gid uint32) error {
+	clean, err := core.SanitizePath(path)
+	if err != nil {
+		return err
+	}
+	mode = core.SanitizeMode(mode)
+
+	s.write.Lock()
+	defer s.write.Unlock()
+
+	cur, have, err := s.lookup(ctx, clean)
+	if err != nil {
+		return err
+	}
+	if !have || cur.Deleted {
+		return fmt.Errorf("%w: %s", store.ErrNotFound, clean)
+	}
+	if cur.Mode == mode && cur.UID == uid && cur.GID == gid {
+		return nil
+	}
+
+	next := cur
+	next.Mode, next.UID, next.GID = mode, uid, gid
+	next.PrevHash = cur.Hash
+	next.Seq = 0
+	next.Version = core.Version{HLC: s.clock.Now(), Origin: s.cfg.Node}
+	return s.commit(ctx, next)
 }
 
 // Delete records a locally originated deletion as a tombstone.
