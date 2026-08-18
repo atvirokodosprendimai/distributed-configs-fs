@@ -253,19 +253,20 @@ func (s *Store) Digest(ctx context.Context) (digest string, entries int64, head 
 	return hex.EncodeToString(h.Sum(nil)), int64(len(rows)), head, nil
 }
 
-// Apply persists entries and stamps each with the next local feed position, in
-// one transaction.
+// Apply persists entries, stamps each with the next local feed position, and
+// returns the resulting feed head.
 //
 // It performs no conflict resolution: the syncer decides what wins before
 // calling this. Batching matters because a rejoining node applies the whole
 // tree at once, and a transaction per path would turn a rejoin into ten
-// thousand fsyncs.
-func (s *Store) Apply(ctx context.Context, metas ...core.Meta) error {
+// thousand fsyncs. The returned head is what the caller gossips, so peers know
+// there is something new to pull.
+func (s *Store) Apply(ctx context.Context, metas ...core.Meta) (int64, error) {
 	if len(metas) == 0 {
-		return nil
+		return s.Head(ctx)
 	}
-	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var head int64
+	var head int64
+	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		// RETURNING keeps the read and the increment in one statement, so the
 		// counter cannot be read by one caller and written by another.
 		if err := tx.Raw("UPDATE local SET seq = seq + ? WHERE id = 1 RETURNING seq", len(metas)).
@@ -289,6 +290,19 @@ func (s *Store) Apply(ctx context.Context, metas ...core.Meta) error {
 		}
 		return nil
 	})
+	if err != nil {
+		return 0, err
+	}
+	return head, nil
+}
+
+// Head returns this node's current changes-feed position.
+func (s *Store) Head(ctx context.Context) (int64, error) {
+	var head int64
+	if err := s.db.WithContext(ctx).Raw("SELECT seq FROM local WHERE id = 1").Scan(&head).Error; err != nil {
+		return 0, fmt.Errorf("read feed head: %w", err)
+	}
+	return head, nil
 }
 
 // PutBlob stores content and returns its hash. Storing a blob that is already
@@ -438,8 +452,10 @@ func (s *Store) Stats(ctx context.Context) (Stats, error) {
 	if err := db.Model(&blobRow{}).Select("COALESCE(SUM(size), 0)").Scan(&st.BlobBytes).Error; err != nil {
 		return Stats{}, fmt.Errorf("sum blob sizes: %w", err)
 	}
-	if err := db.Raw("SELECT seq FROM local WHERE id = 1").Scan(&st.Head).Error; err != nil {
-		return Stats{}, fmt.Errorf("read feed head: %w", err)
+	head, err := s.Head(ctx)
+	if err != nil {
+		return Stats{}, err
 	}
+	st.Head = head
 	return st, nil
 }

@@ -47,7 +47,7 @@ func TestApplyAndGetRoundTrip(t *testing.T) {
 	want := meta("nginx/nginx.conf", "abc123", 100, "node1")
 	want.PrevHash = "old999"
 	want.UID, want.GID, want.Mode = 33, 33, 0o600
-	if err := s.Apply(ctx, want); err != nil {
+	if _, err := s.Apply(ctx, want); err != nil {
 		t.Fatalf("Apply() = %v", err)
 	}
 
@@ -77,7 +77,7 @@ func TestApplyAdvancesFeedOnUpdate(t *testing.T) {
 	ctx := t.Context()
 	s := open(t)
 
-	if err := s.Apply(ctx, meta("a.conf", "v1", 100, "node1")); err != nil {
+	if _, err := s.Apply(ctx, meta("a.conf", "v1", 100, "node1")); err != nil {
 		t.Fatalf("Apply() = %v", err)
 	}
 	first, err := s.Get(ctx, "a.conf")
@@ -85,7 +85,7 @@ func TestApplyAdvancesFeedOnUpdate(t *testing.T) {
 		t.Fatalf("Get() = %v", err)
 	}
 
-	if err := s.Apply(ctx, meta("a.conf", "v2", 200, "node1")); err != nil {
+	if _, err := s.Apply(ctx, meta("a.conf", "v2", 200, "node1")); err != nil {
 		t.Fatalf("Apply() update = %v", err)
 	}
 	second, err := s.Get(ctx, "a.conf")
@@ -119,7 +119,7 @@ func TestManifestSinceIsAFeed(t *testing.T) {
 		meta("b.conf", "h2", 101, "node1"),
 		meta("c.conf", "h3", 102, "node1"),
 	}
-	if err := s.Apply(ctx, batch...); err != nil {
+	if _, err := s.Apply(ctx, batch...); err != nil {
 		t.Fatalf("Apply(batch) = %v", err)
 	}
 
@@ -171,13 +171,13 @@ func TestDigestIgnoresLocalSeq(t *testing.T) {
 
 	// Node a learns both at once; node b learns them one at a time and in the
 	// other order, so its seq numbering differs.
-	if err := a.Apply(ctx, entries...); err != nil {
+	if _, err := a.Apply(ctx, entries...); err != nil {
 		t.Fatalf("a.Apply() = %v", err)
 	}
-	if err := b.Apply(ctx, entries[1]); err != nil {
+	if _, err := b.Apply(ctx, entries[1]); err != nil {
 		t.Fatalf("b.Apply() = %v", err)
 	}
-	if err := b.Apply(ctx, entries[0]); err != nil {
+	if _, err := b.Apply(ctx, entries[0]); err != nil {
 		t.Fatalf("b.Apply() = %v", err)
 	}
 
@@ -197,7 +197,7 @@ func TestDigestIgnoresLocalSeq(t *testing.T) {
 	}
 
 	// A real difference must change the digest, or the check is worthless.
-	if err := b.Apply(ctx, meta("a.conf", "changed", 200, "node2")); err != nil {
+	if _, err := b.Apply(ctx, meta("a.conf", "changed", 200, "node2")); err != nil {
 		t.Fatalf("b.Apply() = %v", err)
 	}
 	db2, _, _, err := b.Digest(ctx)
@@ -278,7 +278,7 @@ func TestGCTombstonesRespectsHorizon(t *testing.T) {
 		DeletedAt: now - int64(time.Minute),
 	}
 	live := meta("alive.conf", "h1", 102, "node1")
-	if err := s.Apply(ctx, old, recent, live); err != nil {
+	if _, err := s.Apply(ctx, old, recent, live); err != nil {
 		t.Fatalf("Apply() = %v", err)
 	}
 
@@ -314,7 +314,7 @@ func TestGCBlobsKeepsReferencedContent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PutBlob() = %v", err)
 	}
-	if err := s.Apply(ctx, meta("a.conf", kept, 100, "node1")); err != nil {
+	if _, err := s.Apply(ctx, meta("a.conf", kept, 100, "node1")); err != nil {
 		t.Fatalf("Apply() = %v", err)
 	}
 
@@ -387,7 +387,7 @@ func TestOpenIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open() = %v", err)
 	}
-	if err := s.Apply(ctx, meta("a.conf", "h1", 100, "node1")); err != nil {
+	if _, err := s.Apply(ctx, meta("a.conf", "h1", 100, "node1")); err != nil {
 		t.Fatalf("Apply() = %v", err)
 	}
 	if err := s.Close(); err != nil {
